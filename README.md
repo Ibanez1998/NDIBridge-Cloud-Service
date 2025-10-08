@@ -2,6 +2,18 @@
 
 Zero-configuration NAT traversal service for NDI Bridge. Enables remote NDI streaming without port forwarding or firewall configuration.
 
+## ⚡ Quick Deploy
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/ndi-bridge?referralCode=alphasec)
+
+**Or deploy manually from GitHub:**
+1. Go to https://railway.app/new
+2. Click "Deploy from GitHub repo"
+3. Select `Ibanez1998/NDIBridge-Cloud-Service`
+4. Click "Deploy"
+5. Generate a domain in Settings → Networking
+6. Copy your URL (e.g., `ndi-bridge-xyz123.up.railway.app`)
+
 ## 🚀 Features
 
 - **Simple Join Codes**: 6-character codes (e.g., `AB-1234`)
