@@ -15,9 +15,11 @@ const express = require('express');
 const WebSocket = require('ws');
 const cors = require('cors');
 const { customAlphabet } = require('nanoid');
+const dgram = require('dgram');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const UDP_PORT = process.env.UDP_PORT || 3478; // STUN standard port
 
 // Generate readable join codes (uppercase letters + numbers, no ambiguous chars)
 const generateCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
@@ -336,11 +338,85 @@ function handleDisconnect(connectionId) {
   console.log(`🔌 Connection closed: ${connectionId}`);
 }
 
+// UDP Server for STUN-like NAT discovery
+const udpServer = dgram.createSocket('udp4');
+
+udpServer.on('message', (msg, rinfo) => {
+  try {
+    const data = JSON.parse(msg.toString());
+
+    if (data.type === 'stun_request') {
+      // Respond with client's public IP and port
+      const response = {
+        type: 'stun_response',
+        publicIP: rinfo.address,
+        publicPort: rinfo.port,
+        sessionCode: data.sessionCode
+      };
+
+      const responseBuffer = Buffer.from(JSON.stringify(response));
+      udpServer.send(responseBuffer, rinfo.port, rinfo.address, (err) => {
+        if (err) {
+          console.error('❌ Failed to send STUN response:', err);
+        } else {
+          console.log(`🔍 STUN response sent to ${rinfo.address}:${rinfo.port}`);
+        }
+      });
+
+      // Also broadcast this info to other peers in the session via WebSocket
+      if (data.sessionCode) {
+        const session = sessions.get(data.sessionCode);
+        if (session) {
+          const udpInfo = {
+            type: 'peer_udp_info',
+            peerId: data.peerId,
+            publicIP: rinfo.address,
+            publicPort: rinfo.port
+          };
+
+          // Notify all peers in session
+          const allPeers = [session.host, ...session.clients].filter(Boolean);
+          allPeers.forEach(peerId => {
+            const peer = connections.get(peerId);
+            if (peer?.ws && peerId !== data.peerId) {
+              peer.ws.send(JSON.stringify(udpInfo));
+            }
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.error('❌ UDP message error:', error);
+  }
+});
+
+udpServer.on('listening', () => {
+  const address = udpServer.address();
+  console.log(`📡 UDP STUN server listening on ${address.address}:${address.port}`);
+});
+
+udpServer.on('error', (err) => {
+  console.error('❌ UDP server error:', err);
+  udpServer.close();
+});
+
+// Start UDP server (Railway binds UDP dynamically, fallback to 3478 locally)
+const bindUDP = () => {
+  try {
+    udpServer.bind(UDP_PORT);
+  } catch (err) {
+    console.error('⚠️ Failed to bind UDP port, STUN disabled');
+  }
+};
+
+bindUDP();
+
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('⏹️ SIGTERM received, closing server...');
+  console.log('⏹️ SIGTERM received, closing servers...');
+  udpServer.close();
   server.close(() => {
-    console.log('✅ Server closed');
+    console.log('✅ Servers closed');
     process.exit(0);
   });
 });
