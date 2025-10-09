@@ -243,7 +243,8 @@ function handleSignal(ws, connectionId, data) {
       break;
 
     case 'connection_info':
-      // Share direct connection information
+    case 'udp_endpoint':
+      // Share direct connection information and UDP endpoints
       forwardSignal(connectionId, data);
       break;
 
