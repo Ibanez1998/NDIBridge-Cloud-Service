@@ -142,6 +142,109 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+// ===== HTTP POLLING ENDPOINTS (WebSocket Alternative) =====
+
+// Host updates its UDP endpoint
+app.post('/api/host/endpoint/:code', (req, res) => {
+  const { code } = req.params;
+  const { publicIP, publicPort, peerId } = req.body;
+
+  const session = sessions.get(code);
+  if (!session) {
+    return res.status(404).json({ success: false, message: 'Session not found' });
+  }
+
+  session.hostEndpoint = { publicIP, publicPort, peerId, updatedAt: Date.now() };
+  console.log(`🏠 Host endpoint updated for ${code}: ${publicIP}:${publicPort}`);
+
+  res.json({ success: true });
+});
+
+// Client updates its UDP endpoint
+app.post('/api/client/endpoint/:code', (req, res) => {
+  const { code } = req.params;
+  const { publicIP, publicPort, peerId, clientName } = req.body;
+
+  const session = sessions.get(code);
+  if (!session) {
+    return res.status(404).json({ success: false, message: 'Session not found' });
+  }
+
+  // Store or update client endpoint
+  const existingIndex = session.clientEndpoints?.findIndex(c => c.peerId === peerId);
+  const endpoint = { publicIP, publicPort, peerId, clientName, updatedAt: Date.now() };
+
+  if (!session.clientEndpoints) session.clientEndpoints = [];
+
+  if (existingIndex >= 0) {
+    session.clientEndpoints[existingIndex] = endpoint;
+  } else {
+    session.clientEndpoints.push(endpoint);
+  }
+
+  console.log(`👤 Client endpoint updated for ${code}: ${publicIP}:${publicPort}`);
+
+  res.json({ success: true });
+});
+
+// Host polls for client connections
+app.get('/api/host/poll/:code', (req, res) => {
+  const { code } = req.params;
+  const session = sessions.get(code);
+
+  if (!session) {
+    return res.status(404).json({ success: false, message: 'Session not found' });
+  }
+
+  // Return list of connected clients with their UDP endpoints
+  const clients = (session.clientEndpoints || []).map(c => ({
+    peerId: c.peerId,
+    clientName: c.clientName,
+    publicIP: c.publicIP,
+    publicPort: c.publicPort,
+    connected: (Date.now() - c.updatedAt) < 30000 // Active if updated in last 30s
+  }));
+
+  res.json({
+    success: true,
+    clients,
+    hostEndpoint: session.hostEndpoint || null
+  });
+});
+
+// Client polls for host status and endpoint
+app.get('/api/client/poll/:code', (req, res) => {
+  const { code } = req.params;
+  const session = sessions.get(code);
+
+  if (!session) {
+    return res.status(404).json({ success: false, message: 'Session not found' });
+  }
+
+  const hostAvailable = session.hostEndpoint && (Date.now() - session.hostEndpoint.updatedAt) < 30000;
+
+  res.json({
+    success: true,
+    bridgeName: session.bridgeName,
+    sources: session.sources,
+    hostAvailable,
+    hostEndpoint: hostAvailable ? {
+      publicIP: session.hostEndpoint.publicIP,
+      publicPort: session.hostEndpoint.publicPort,
+      peerId: session.hostEndpoint.peerId
+    } : null,
+    // Also return other clients in case of peer-to-peer mesh
+    otherClients: (session.clientEndpoints || [])
+      .filter(c => (Date.now() - c.updatedAt) < 30000)
+      .map(c => ({
+        peerId: c.peerId,
+        clientName: c.clientName,
+        publicIP: c.publicIP,
+        publicPort: c.publicPort
+      }))
+  });
+});
+
 // Start HTTP server
 const server = app.listen(PORT, () => {
   console.log(`🚀 NDI Bridge Rendezvous Service`);
