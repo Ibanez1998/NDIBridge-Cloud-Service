@@ -142,6 +142,87 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+// Log upload endpoint
+const uploadedLogs = new Map(); // Store logs in memory (use database for production)
+
+app.post('/api/logs/upload', (req, res) => {
+  const { deviceName, timestamp, logContents, platform, appVersion } = req.body;
+
+  if (!logContents) {
+    return res.status(400).json({ success: false, message: 'No log contents provided' });
+  }
+
+  // Generate unique log ID
+  const logId = generateCode();
+
+  const logEntry = {
+    logId,
+    deviceName: deviceName || 'Unknown',
+    timestamp: timestamp || new Date().toISOString(),
+    platform: platform || 'Unknown',
+    appVersion: appVersion || 'Unknown',
+    logContents,
+    uploadedAt: Date.now()
+  };
+
+  uploadedLogs.set(logId, logEntry);
+
+  console.log(`📤 Log uploaded from ${deviceName} [${logId}]`);
+
+  res.json({
+    success: true,
+    logId,
+    message: 'Logs uploaded successfully'
+  });
+});
+
+// Get uploaded log by ID
+app.get('/api/logs/:logId', (req, res) => {
+  const { logId } = req.params;
+  const log = uploadedLogs.get(logId);
+
+  if (!log) {
+    return res.status(404).json({ success: false, message: 'Log not found' });
+  }
+
+  res.json({
+    success: true,
+    log
+  });
+});
+
+// List all uploaded logs
+app.get('/api/logs', (req, res) => {
+  const logs = Array.from(uploadedLogs.values())
+    .sort((a, b) => b.uploadedAt - a.uploadedAt)
+    .map(log => ({
+      logId: log.logId,
+      deviceName: log.deviceName,
+      timestamp: log.timestamp,
+      platform: log.platform,
+      appVersion: log.appVersion,
+      uploadedAt: log.uploadedAt,
+      size: log.logContents.length
+    }));
+
+  res.json({
+    success: true,
+    count: logs.length,
+    logs
+  });
+});
+
+// Delete old logs (cleanup) - remove logs older than 24 hours
+setInterval(() => {
+  const now = Date.now();
+  for (const [logId, log] of uploadedLogs.entries()) {
+    if (now - log.uploadedAt > 24 * 60 * 60 * 1000) {
+      console.log(`🧹 Cleaning up old log: ${logId}`);
+      uploadedLogs.delete(logId);
+    }
+  }
+}, 60 * 60 * 1000); // Check every hour
+
 // ===== HTTP POLLING ENDPOINTS (WebSocket Alternative) =====
 
 // Host updates its UDP endpoint
