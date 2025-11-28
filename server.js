@@ -5,10 +5,10 @@
  * Enables remote connections without port forwarding or firewall config
  *
  * Features:
- * - Simple 6-character join codes
- * - WebSocket signaling for NAT traversal
- * - Session management
- * - Connection stats
+ * - Auto-discovery of available NDI hosts (no join codes needed!)
+ * - Host registry with heartbeat-based presence
+ * - P2P UDP connection coordination
+ * - Session management for active connections
  */
 
 const express = require('express');
@@ -21,16 +21,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const UDP_PORT = process.env.UDP_PORT || 3478; // STUN standard port
 
-// Generate readable join codes (uppercase letters + numbers, no ambiguous chars)
+// Generate readable codes (uppercase letters + numbers, no ambiguous chars)
 const generateCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
+const generateHostId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// In-memory session storage (use Redis for production scaling)
+// In-memory storage (use Redis for production scaling)
 const sessions = new Map();
 const connections = new Map();
+const hosts = new Map();  // Host registry for auto-discovery
+
+// Host timeout - remove hosts that haven't sent heartbeat in 45 seconds
+const HOST_TIMEOUT_MS = 45000;
 
 // Session cleanup - remove expired sessions (30 min timeout)
 setInterval(() => {
@@ -42,6 +47,17 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000); // Check every 5 minutes
+
+// Host cleanup - remove hosts that haven't sent heartbeat
+setInterval(() => {
+  const now = Date.now();
+  for (const [hostId, host] of hosts.entries()) {
+    if (now - host.lastHeartbeat > HOST_TIMEOUT_MS) {
+      console.log(`🧹 Removing stale host: ${host.computerName} (${hostId})`);
+      hosts.delete(hostId);
+    }
+  }
+}, 15000); // Check every 15 seconds
 
 // REST API Routes
 
@@ -138,8 +154,221 @@ app.get('/api/stats', (req, res) => {
   res.json({
     activeSessions: sessions.size,
     activeConnections: connections.size,
+    activeHosts: hosts.size,
     uptime: process.uptime()
   });
+});
+
+// ===== HOST REGISTRY API (Auto-Discovery) =====
+
+// Register a host with its available NDI sources
+app.post('/api/hosts/register', (req, res) => {
+  const { hostId, computerName, sources, publicIP, publicPort } = req.body;
+
+  if (!computerName || !sources || !Array.isArray(sources)) {
+    return res.status(400).json({
+      success: false,
+      message: 'computerName and sources array required'
+    });
+  }
+
+  // Generate hostId if not provided (first registration)
+  const id = hostId || generateHostId();
+
+  const host = {
+    hostId: id,
+    computerName,
+    sources,  // Array of { name: "NDI Source Name", enabled: true/false }
+    publicIP: publicIP || null,
+    publicPort: publicPort || null,
+    registeredAt: hosts.has(id) ? hosts.get(id).registeredAt : Date.now(),
+    lastHeartbeat: Date.now(),
+    connectedClients: []
+  };
+
+  hosts.set(id, host);
+
+  const enabledSources = sources.filter(s => s.enabled);
+  console.log(`📡 Host registered: ${computerName} with ${enabledSources.length} sources (${id})`);
+
+  res.json({
+    success: true,
+    hostId: id,
+    message: 'Host registered successfully'
+  });
+});
+
+// Host heartbeat - keeps host in registry and updates endpoint
+app.post('/api/hosts/heartbeat/:hostId', (req, res) => {
+  const { hostId } = req.params;
+  const { publicIP, publicPort, sources } = req.body;
+
+  const host = hosts.get(hostId);
+  if (!host) {
+    return res.status(404).json({
+      success: false,
+      message: 'Host not found. Please re-register.'
+    });
+  }
+
+  // Update host info
+  host.lastHeartbeat = Date.now();
+  if (publicIP) host.publicIP = publicIP;
+  if (publicPort) host.publicPort = publicPort;
+  if (sources) host.sources = sources;
+
+  // Return any pending client connection requests
+  const pendingClients = host.connectedClients.filter(c => !c.acknowledged);
+
+  res.json({
+    success: true,
+    pendingClients: pendingClients.map(c => ({
+      clientId: c.clientId,
+      clientName: c.clientName,
+      publicIP: c.publicIP,
+      publicPort: c.publicPort,
+      requestedSource: c.requestedSource
+    }))
+  });
+});
+
+// Host goes offline
+app.delete('/api/hosts/:hostId', (req, res) => {
+  const { hostId } = req.params;
+
+  if (hosts.has(hostId)) {
+    const host = hosts.get(hostId);
+    console.log(`👋 Host unregistered: ${host.computerName} (${hostId})`);
+    hosts.delete(hostId);
+  }
+
+  res.json({ success: true });
+});
+
+// Get list of all available hosts (for clients to browse)
+app.get('/api/hosts', (req, res) => {
+  const now = Date.now();
+  const availableHosts = [];
+
+  for (const [hostId, host] of hosts.entries()) {
+    // Only include hosts with recent heartbeat
+    if (now - host.lastHeartbeat < HOST_TIMEOUT_MS) {
+      const enabledSources = host.sources.filter(s => s.enabled);
+      if (enabledSources.length > 0) {
+        availableHosts.push({
+          hostId,
+          computerName: host.computerName,
+          sources: enabledSources.map(s => s.name),
+          online: true,
+          lastSeen: host.lastHeartbeat
+        });
+      }
+    }
+  }
+
+  console.log(`📋 Host list requested: ${availableHosts.length} hosts available`);
+
+  res.json({
+    success: true,
+    hosts: availableHosts
+  });
+});
+
+// Client requests to connect to a specific host/source
+app.post('/api/hosts/:hostId/connect', (req, res) => {
+  const { hostId } = req.params;
+  const { clientId, clientName, sourceName, publicIP, publicPort } = req.body;
+
+  const host = hosts.get(hostId);
+  if (!host) {
+    return res.status(404).json({
+      success: false,
+      message: 'Host not found or offline'
+    });
+  }
+
+  // Check if source exists and is enabled
+  const source = host.sources.find(s => s.name === sourceName && s.enabled);
+  if (!source) {
+    return res.status(404).json({
+      success: false,
+      message: 'Source not found or not shared'
+    });
+  }
+
+  // Add client to host's pending connections
+  const connectionRequest = {
+    clientId: clientId || generateCode(),
+    clientName: clientName || 'Unknown Client',
+    requestedSource: sourceName,
+    publicIP,
+    publicPort,
+    requestedAt: Date.now(),
+    acknowledged: false
+  };
+
+  host.connectedClients.push(connectionRequest);
+
+  console.log(`🔗 Connection request: ${clientName} -> ${host.computerName}/${sourceName}`);
+
+  res.json({
+    success: true,
+    clientId: connectionRequest.clientId,
+    hostEndpoint: {
+      publicIP: host.publicIP,
+      publicPort: host.publicPort
+    },
+    message: 'Connection request sent to host'
+  });
+});
+
+// Client polls for connection status
+app.get('/api/hosts/:hostId/status/:clientId', (req, res) => {
+  const { hostId, clientId } = req.params;
+
+  const host = hosts.get(hostId);
+  if (!host) {
+    return res.status(404).json({
+      success: false,
+      message: 'Host not found or offline'
+    });
+  }
+
+  const client = host.connectedClients.find(c => c.clientId === clientId);
+  if (!client) {
+    return res.status(404).json({
+      success: false,
+      message: 'Connection request not found'
+    });
+  }
+
+  res.json({
+    success: true,
+    hostOnline: (Date.now() - host.lastHeartbeat) < HOST_TIMEOUT_MS,
+    hostEndpoint: {
+      publicIP: host.publicIP,
+      publicPort: host.publicPort
+    },
+    acknowledged: client.acknowledged
+  });
+});
+
+// Host acknowledges a client connection
+app.post('/api/hosts/:hostId/acknowledge/:clientId', (req, res) => {
+  const { hostId, clientId } = req.params;
+
+  const host = hosts.get(hostId);
+  if (!host) {
+    return res.status(404).json({ success: false, message: 'Host not found' });
+  }
+
+  const client = host.connectedClients.find(c => c.clientId === clientId);
+  if (client) {
+    client.acknowledged = true;
+    console.log(`✅ Connection acknowledged: ${client.clientName} -> ${host.computerName}`);
+  }
+
+  res.json({ success: true });
 });
 
 // Log upload endpoint
