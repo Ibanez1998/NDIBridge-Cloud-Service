@@ -161,6 +161,18 @@ app.get('/api/stats', (req, res) => {
 
 // ===== HOST REGISTRY API (Auto-Discovery) =====
 
+// Helper to get client IP from request (handles proxies like Railway)
+function getClientIP(req) {
+  // Railway and other proxies set X-Forwarded-For header
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) {
+    // X-Forwarded-For can contain multiple IPs, first one is the client
+    return forwarded.split(',')[0].trim();
+  }
+  // Fall back to direct connection IP
+  return req.ip || req.connection?.remoteAddress || null;
+}
+
 // Register a host with its available NDI sources
 app.post('/api/hosts/register', (req, res) => {
   const { hostId, computerName, sources, publicIP, publicPort } = req.body;
@@ -175,12 +187,15 @@ app.post('/api/hosts/register', (req, res) => {
   // Generate hostId if not provided (first registration)
   const id = hostId || generateHostId();
 
+  // Auto-detect public IP from HTTP request if not provided
+  const detectedIP = publicIP || getClientIP(req);
+
   const host = {
     hostId: id,
     computerName,
     sources,  // Array of { name: "NDI Source Name", enabled: true/false }
-    publicIP: publicIP || null,
-    publicPort: publicPort || null,
+    publicIP: detectedIP,
+    publicPort: publicPort || 5961,  // Default NDI port
     registeredAt: hosts.has(id) ? hosts.get(id).registeredAt : Date.now(),
     lastHeartbeat: Date.now(),
     connectedClients: []
@@ -189,11 +204,12 @@ app.post('/api/hosts/register', (req, res) => {
   hosts.set(id, host);
 
   const enabledSources = sources.filter(s => s.enabled);
-  console.log(`📡 Host registered: ${computerName} with ${enabledSources.length} sources (${id})`);
+  console.log(`📡 Host registered: ${computerName} with ${enabledSources.length} sources (${id}) - IP: ${detectedIP}`);
 
   res.json({
     success: true,
     hostId: id,
+    publicIP: detectedIP,
     message: 'Host registered successfully'
   });
 });
@@ -213,7 +229,9 @@ app.post('/api/hosts/heartbeat/:hostId', (req, res) => {
 
   // Update host info
   host.lastHeartbeat = Date.now();
-  if (publicIP) host.publicIP = publicIP;
+  // Update IP - prefer explicit, then auto-detect from request
+  const detectedIP = publicIP || getClientIP(req);
+  if (detectedIP) host.publicIP = detectedIP;
   if (publicPort) host.publicPort = publicPort;
   if (sources) host.sources = sources;
 
