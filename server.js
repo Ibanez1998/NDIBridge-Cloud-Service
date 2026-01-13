@@ -278,6 +278,8 @@ app.get('/api/hosts', (req, res) => {
           computerName: host.computerName,
           sources: enabledSources.map(s => s.name),
           online: true,
+          publicIP: host.publicIP,
+          publicPort: host.publicPort,
           lastSeen: host.lastHeartbeat
         });
       }
