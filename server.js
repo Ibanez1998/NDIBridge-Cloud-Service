@@ -195,7 +195,7 @@ app.post('/api/hosts/register', (req, res) => {
     computerName,
     sources,  // Array of { name: "NDI Source Name", enabled: true/false }
     publicIP: detectedIP,
-    publicPort: publicPort || 5961,  // Default NDI port
+    publicPort: publicPort || 5990,  // Default NDI Bridge port
     registeredAt: hosts.has(id) ? hosts.get(id).registeredAt : Date.now(),
     lastHeartbeat: Date.now(),
     connectedClients: []
